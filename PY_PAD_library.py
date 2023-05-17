@@ -13,7 +13,7 @@ def check_input_fields(fa, fb):
 	
 	# test if fields are numpy arrays
 	if type(fa) is not np.ndarray or type(fa) is not np.ndarray:
-		print("ERROR: the fa and fa are not numpy arrays which is not allowed. Returning \"None\" as result!")
+		print("ERROR: the fa and fa are not numpy arrays of type numpy.ndarray - this is not permitted! Perhaps they are masked arrays, which is also not permitted. Returning \"None\" as result!")
 		return(False)
 	
 	# compare dimensions of fields
