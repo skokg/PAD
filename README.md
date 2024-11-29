@@ -46,4 +46,4 @@ Email: Gregor.Skok@fmf.uni-lj.si
 
 #### References:
 
-Manuscript submitted to the Atmospheric Research journal.
+Skok, G. (2023) Precipitation attribution distance. Atmospheric Research, 295. [ https://doi.org/10.1016/j.atmosres.2023.106998]( https://doi.org/10.1016/j.atmosres.2023.106998)
