@@ -75,52 +75,24 @@ def check_if_max_number_of_nonzero_points_integer(max_number_of_nonzero_points):
 # -----------------------------------------------------------------------------------------------------
 # -----------------------------------------------------------------------------------------------------
 
-ND_POINTER_2D = np.ctypeslib.ndpointer(dtype=np.float64, ndim=2, flags="C")
+ND_POINTER_1D = np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags="C")
 
 # -----------------------------------------------------------------------------------------------------
 # -----------------------------------------------------------------------------------------------------
-
-libc.calculate_PAD_ctypes.argtypes = [ND_POINTER_2D, ND_POINTER_2D, c_size_t, c_size_t, c_size_t]
-libc.calculate_PAD_ctypes.restype = c_double
-
-def calculate_PAD(fa, fb, max_number_of_nonzero_points = 100000):
-	
-	# check input fields
-	if check_input_fields(fa, fb) != True:
-		return(None)
-	
-	#check max_number_of_nonzero_points is integer
-	if check_if_max_number_of_nonzero_points_integer(max_number_of_nonzero_points) != True:
-		return(None)
-	
-	# if needed make a copy and cast to float64 - just in case the input fields are integers
-	if fa.dtype != np.float64:
-		fa=fa.astype(float64, copy=True)
-	if fb.dtype != np.float64:
-		fb=fb.astype(float64, copy=True)
-	
-	PADtemp = libc.calculate_PAD_ctypes(fa, fb, fa.shape[1], fa.shape[0], max_number_of_nonzero_points)
-	
-	
-	return(PADtemp)
-
-# -----------------------------------------------------------------------------------------------------
-# -----------------------------------------------------------------------------------------------------
-
-libc.calculate_PAD_attributions_ctypes.argtypes = [ND_POINTER_2D, ND_POINTER_2D, c_size_t, c_size_t, c_size_t, POINTER(c_size_t)]
-libc.calculate_PAD_attributions_ctypes.restype = POINTER(c_double)
 
 libc.free_mem_double_array.argtypes = [POINTER(c_double)]
 libc.free_mem_double_array.restype = None
 
-def calculate_PAD_attributions(fa, fb, max_number_of_nonzero_points = 100000):
+# -----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
+libc.calculate_PAD_results_assume_different_grid_ctypes.argtypes = [ND_POINTER_1D, ND_POINTER_1D, ND_POINTER_1D, c_size_t, ND_POINTER_1D, ND_POINTER_1D, ND_POINTER_1D, c_size_t, POINTER(c_size_t)]
+libc.calculate_PAD_results_assume_different_grid_ctypes.restype = POINTER(c_double)
+
+def calculate_PAD_attributions(fa, fb):
 	
 	# check input fields
 	if check_input_fields(fa, fb) != True:
-		return(None)
-	
-	#check max_number_of_nonzero_points is integer
-	if check_if_max_number_of_nonzero_points_integer(max_number_of_nonzero_points) != True:
 		return(None)
 	
 	# if needed make a copy and cast to float64 - just in case the input fields are integers
@@ -129,34 +101,37 @@ def calculate_PAD_attributions(fa, fb, max_number_of_nonzero_points = 100000):
 	if fb.dtype != np.float64:
 		fb=fb.astype(float64, copy=True)
 	
+	values1=np.reshape(fa,(-1)).astype(np.float64)
+	values2=np.reshape(fb,(-1)).astype(np.float64)
+	
+	#normalize the field values
+	values1 = np.ascontiguousarray(values1/np.sum(values1), np.float64)
+	values2 = np.ascontiguousarray(values2/np.sum(values2), np.float64)
+	
+	x = np.ascontiguousarray(np.tile(range(fa.shape[1]),fa.shape[0]), np.float64)
+	y = np.ascontiguousarray(np.repeat(range(fa.shape[0]),fa.shape[1]), np.float64)
+
 	c_number_of_attributions = c_size_t()
 	
-	results = libc.calculate_PAD_attributions_ctypes(fa,fb,fa.shape[1],fa.shape[0], max_number_of_nonzero_points, byref(c_number_of_attributions))
+	results = libc.calculate_PAD_results_assume_different_grid_ctypes(x, y, values1, x.shape[0], x, y, values2, x.shape[0], byref(c_number_of_attributions))
 	
 	number_of_attributions = c_number_of_attributions.value
 	
 	#print(number_of_attributions)
 	
-	attributions = np.asarray(results[0:number_of_attributions*6]).reshape(number_of_attributions,-1)
+	raw_attributions = np.asarray(results[0:number_of_attributions*4]).reshape(number_of_attributions,-1)
 	
 	libc.free_mem_double_array(results)
 	
-	return(attributions)
+	attributions_with_xy_coordinates = np.transpose(np.asarray( [raw_attributions[:,0], raw_attributions[:,1], x[raw_attributions[:,2].astype(int)], y[raw_attributions[:,2].astype(int)], x[raw_attributions[:,3].astype(int)], y[raw_attributions[:,3].astype(int)] ]))
+	
+	return(attributions_with_xy_coordinates)
 
 # -----------------------------------------------------------------------------------------------------
 # -----------------------------------------------------------------------------------------------------
 
 
-def calculate_PAD_attribution_PDF(fa, fb, max_number_of_nonzero_points = 100000):
+def calculate_PAD_distance_from_attributions(PAD_attributions):
 	
-	PAD_attributions = calculate_PAD_attributions(fa, fb, max_number_of_nonzero_points=max_number_of_nonzero_points)
-	
-	if type(fa) is not np.ndarray:
-		return(None)
-	
-	maxdistance=np.ceil(np.max(PAD_attributions[:,0])) + 1
-	
-	hist = np.histogram(PAD_attributions[:,0], bins=int(maxdistance), range=(0,maxdistance), density=True, weights=PAD_attributions[:,1])
-	
-	return( np.asarray([hist[1][:-1]+0.5, hist[0][:]]).transpose(1,0))
+	return(np.sum(PAD_attributions[:,0]*PAD_attributions[:,1])/np.sum(PAD_attributions[:,1]))
 

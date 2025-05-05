@@ -37,29 +37,37 @@ nc_file_id.close()
 # ------------------------------------------------------
 
 # Calculate and print the PAD value (the output for the sample fields will be approximately 100 grid points)
-PAD_value = calculate_PAD(fa,fb)
-print(PAD_value)
+PAD_attributions = calculate_PAD_attributions(fa,fb)
+print(PAD_attributions)
 
 # Calculate the PAD attribution PDF (Probability Density Function) 
-PAD_PDF = calculate_PAD_attribution_PDF(fa, fb)
+PAD_distance = calculate_PAD_distance_from_attributions(PAD_attributions)
+print("PAD distance: " + str(PAD_distance))
 
-# Display the PAD attribution PDF
+# ------------------------------------------------------------------------------------------------------------------------
+# Draw the attribution PDF 
+# ------------------------------------------------------------------------------------------------------------------------
+
+# Import matplotlib library 
+import matplotlib
+import matplotlib.pyplot as plt
+
+# ---  PDF
+hist = np.histogram(PAD_attributions[:,0], bins=100, range=(0,np.max(PAD_attributions[:,0])), density=True, weights=PAD_attributions[:,1])
+PAD_PDF = np.asarray([hist[1][:-1], hist[0][:]]).transpose(1,0)
 fig, ax = plt.subplots()
 plt.fill_between(PAD_PDF[:,0], PAD_PDF[:,1], 0, linestyle='-')
-mean_value=np.sum(PAD_PDF[:,0]*PAD_PDF[:,1])/np.sum(PAD_PDF[:,1])
-plt.axvline(mean_value, color="navy", label="mean", linestyle='--')
-plt.ylim(bottom = 0, top = np.percentile(PAD_PDF[:,1],98)*1.2)
+plt.axvline(PAD_distance, color="navy", label="PAD_distance = "+str(PAD_distance), linestyle='--')
+plt.ylim(bottom = 0, top = 1.2*np.max(PAD_PDF[10:,1]))
 plt.xlim(left = 0)
-plt.xlabel("attribution distance")
+plt.xlabel("Attribution distance")
 plt.ylabel("PDF")
 leg=plt.legend(loc = "upper right")
 plt.show()
 plt.close()
 
+
 # Display the two-dimensional PDF 
-PAD_attributions = calculate_PAD_attributions(fa,fb)
-dimx = fa.shape[1]
-dimy = fa.shape[0]
 dx = PAD_attributions[:,4] - PAD_attributions[:,2] 
 dy = PAD_attributions[:,5] - PAD_attributions[:,3] 
 maxdistance = np.max(fa.shape)
@@ -79,27 +87,21 @@ ax.tick_params(axis='both', labelsize = 13)
 plt.show()
 plt.close()
 
+
+
 # ----------------------------------------------------------
-# Calculate the list of PAD attributions and visualize them 
+# Visualize PAD attributions
 # ----------------------------------------------------------
 
-# Calculate and print the PAD attribution list
-PAD_attributions = calculate_PAD_attributions(fa,fb)
-print(PAD_attributions)
-
-# Make a simple visualization of the attributions 
-# From all attributions only select a randomly chosen subset for 
-# visualization - otherwise the figure would be cluttered with lines.
-number_of_shown_attributions = 300 
-
-# normalize attribution amounts so they sum to 1
-PAD_attributions[:, 1] = PAD_attributions[:, 1]/np.sum(PAD_attributions[:, 1])
-# caluculate cumulative distribution
-cumulative = np.cumsum(PAD_attributions[:, 1])
-# randomly select attributions - the probabilty of selection is proportional to the attribution amount
+# number of attribution lines shown in the figure
+number_of_shown_attributions = 300
+# cumulative distribution
+cumulative = np.cumsum(PAD_attributions[:, 1]/np.sum(PAD_attributions[:, 1]))
+# randomly select attributions - the probability of selection is affected by the attribution value
 rand = np.random.rand(number_of_shown_attributions)	
 ind = np.searchsorted(cumulative,rand)
-PAD_attributions_subset=PAD_attributions[ind]
+PAD_attributions_selected=PAD_attributions[ind]
+
 cmap_b = matplotlib.colors.LinearSegmentedColormap.from_list('rb_cmap',["white",(0.3,0.3,1.0)],512)
 cmap_r = matplotlib.colors.LinearSegmentedColormap.from_list('rb_cmap',["white",(1.0,0.3,0.3)],512)
 norm_b = matplotlib.colors.Normalize()
@@ -114,13 +116,13 @@ ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
 img_extent = (np.min(lon), np.max(lon), np.min(lat), np.max(lat))
 img = plt.imshow(fx, transform=ccrs.PlateCarree(), interpolation='nearest', origin='lower', extent=img_extent)
 # convert attribution point locations to lat/lon coordinates
-PAD_attributions_subset_lat_lon = PAD_attributions_subset.copy()
-PAD_attributions_subset_lat_lon[:,2] = lon[PAD_attributions_subset_lat_lon[:,2].astype(int).tolist()] 
-PAD_attributions_subset_lat_lon[:,4] = lon[PAD_attributions_subset_lat_lon[:,4].astype(int).tolist()] 
-PAD_attributions_subset_lat_lon[:,3] = lat[PAD_attributions_subset_lat_lon[:,3].astype(int).tolist()] 
-PAD_attributions_subset_lat_lon[:,5] = lat[PAD_attributions_subset_lat_lon[:,5].astype(int).tolist()] 
+PAD_attributions_selected_lat_lon = PAD_attributions_selected.copy()
+PAD_attributions_selected_lat_lon[:,2] = lon[PAD_attributions_selected[:,2].astype(int).tolist()] 
+PAD_attributions_selected_lat_lon[:,4] = lon[PAD_attributions_selected[:,4].astype(int).tolist()] 
+PAD_attributions_selected_lat_lon[:,3] = lat[PAD_attributions_selected[:,3].astype(int).tolist()] 
+PAD_attributions_selected_lat_lon[:,5] = lat[PAD_attributions_selected[:,5].astype(int).tolist()] 
 # display attribution lines
-ax.plot(PAD_attributions_subset_lat_lon[:,[2,4]].transpose(), PAD_attributions_subset_lat_lon[:,[3,5]].transpose() ,'-ok',  alpha=0.3, markersize = 2, mfc='black', mec='black',  transform=ccrs.PlateCarree())
+ax.plot(PAD_attributions_selected_lat_lon[:,[2,4]].transpose(), PAD_attributions_selected_lat_lon[:,[3,5]].transpose() ,'-ok',  alpha=0.3, markersize = 2, mfc='black', mec='black',  transform=ccrs.PlateCarree())
 ax.coastlines(resolution='50m', color='grey', linestyle='-', alpha=1)
 plt.show()
 plt.close()
