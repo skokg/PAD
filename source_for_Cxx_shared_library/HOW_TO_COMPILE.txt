@@ -1,0 +1,5 @@
+
+// Compile command for a linux system
+
+g++ -fopenmp -O2 -Wall -Wno-unused-result -Wno-unknown-pragmas -shared -o PAD_Cxx_shared_library.so -fPIC CC_PAD_python_lib.cc
+
