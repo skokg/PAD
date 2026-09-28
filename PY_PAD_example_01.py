@@ -5,7 +5,8 @@
 # Import the PAD python library
 # The PAD python library file (PY_PAD_library.py) as well as the PAD C++ shared library file (PAD_Cxx_shared_library.so) 
 # need to be in the same folder as the script using them
-from PY_PAD_library import *
+import numpy as np
+from PY_PAD_library import calculate_PAD_attributions, calculate_PAD_distance_from_attributions
 
 # Import matplotlib 
 import matplotlib as matplotlib
@@ -32,8 +33,13 @@ fb[100:150,200:250]=1
 # ------------------------------------------------------
 
 # Calculate and print the PAD value (the output for the sample fields will be approximately 100 grid points)
-PAD_attributions = calculate_PAD_attributions(fa,fb)
+# True removes same-grid overlap first; False skips overlap preprocessing.
+# Output columns: distance, normalized amount, x1, y1, x2, y2.
+PAD_attributions, remaining1, remaining2 = calculate_PAD_attributions(
+    fa, fb, remove_overlap=True, normalize=True, distance_cutoff=None, random_seed=5489,
+)
 print(PAD_attributions)
+x1, y1, x2, y2 = PAD_attributions[:, 2:6].astype(np.intp).T
 
 # Calculate the PAD attribution PDF (Probability Density Function) 
 PAD_distance = calculate_PAD_distance_from_attributions(PAD_attributions)
@@ -48,23 +54,23 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 # ---  PDF
-hist = np.histogram(PAD_attributions[:,0], bins=100, range=(0,np.max(PAD_attributions[:,0])), density=True, weights=PAD_attributions[:,1])
+hist = np.histogram(PAD_attributions[:,0], bins=100, range=(0,max(1.0,np.max(PAD_attributions[:,0]))), density=True, weights=PAD_attributions[:,1])
 PAD_PDF = np.asarray([hist[1][:-1], hist[0][:]]).transpose(1,0)
 fig, ax = plt.subplots()
 plt.fill_between(PAD_PDF[:,0], PAD_PDF[:,1], 0, linestyle='-')
 plt.axvline(PAD_distance, color="navy", label="PAD_distance = "+str(PAD_distance), linestyle='--')
-plt.ylim(bottom = 0, top = 1.2*np.max(PAD_PDF[10:,1]))
+plt.ylim(bottom = 0, top = 1.2*np.max(PAD_PDF[:,1]))
 plt.xlim(left = 0)
-plt.xlabel("Attribution distance")
-plt.ylabel("PDF")
+plt.xlabel("Attribution distance (grid cells)")
+plt.ylabel("PDF (per grid cell)")
 leg=plt.legend(loc = "upper right")
 plt.show()
 plt.close()
 
 
 # Display the two-dimensional PDF 
-dx = PAD_attributions[:,4] - PAD_attributions[:,2] 
-dy = PAD_attributions[:,5] - PAD_attributions[:,3] 
+dx = x2 - x1
+dy = y2 - y1
 maxdistance = np.max(fa.shape)
 hist2d = np.histogram2d(dx,dy,weights=PAD_attributions[:,1], bins=[50-1,50-1], range=[(-maxdistance,maxdistance),(-maxdistance,maxdistance)], density=True)
 fig = plt.figure(figsize=(5, 5), linewidth = 3)
@@ -76,8 +82,8 @@ img = ax.imshow(np.transpose(hist2d[0],(1,0)), interpolation='nearest', origin='
 ax.grid(which='major', color='grey', alpha=0.5, linestyle=':', linewidth=1)
 ax.axvline(0, color='grey', alpha=0.8, linestyle='-', linewidth=1)
 ax.axhline(0, color='grey', alpha=0.8, linestyle='-', linewidth=1)
-ax.set_xlabel("$\Delta x$" , fontsize = 13)
-ax.set_ylabel("$\Delta y$" , fontsize = 13)
+ax.set_xlabel(r"$\Delta x$" , fontsize = 13)
+ax.set_ylabel(r"$\Delta y$" , fontsize = 13)
 ax.tick_params(axis='both', labelsize = 13)
 plt.show()
 plt.close()
@@ -90,10 +96,10 @@ plt.close()
 number_of_shown_attributions = 50
 # cumulative distribution
 cumulative = np.cumsum(PAD_attributions[:, 1]/np.sum(PAD_attributions[:, 1]))
+cumulative[-1] = 1.0  # Protect searchsorted from cumulative-sum roundoff.
 # randomly select attributions - the probability of selection is affected by the attribution value
-rand = np.random.rand(number_of_shown_attributions)	
+rand = np.random.default_rng(5489).random(number_of_shown_attributions)
 ind = np.searchsorted(cumulative,rand)
-PAD_attributions_selected=PAD_attributions[ind]
 
 cmap_b = matplotlib.colors.LinearSegmentedColormap.from_list('rb_cmap',["white",(0.3,0.3,1.0)],512)
 cmap_r = matplotlib.colors.LinearSegmentedColormap.from_list('rb_cmap',["white",(1.0,0.3,0.3)],512)
@@ -107,9 +113,7 @@ fx = fax*fbx
 fig = plt.figure(figsize=(10, 10))
 ax = fig.add_subplot(1, 1, 1)
 img = plt.imshow(fx, interpolation='nearest', origin='lower')
-ax.plot(PAD_attributions_selected[:,[2,4]].transpose(), PAD_attributions_selected[:,[3,5]].transpose() ,'-ok',  alpha=0.3, markersize = 2, mfc='black', mec='black')
+ax.plot(np.stack((x1[ind], x2[ind])), np.stack((y1[ind], y2[ind])), '-ok', alpha=0.3, markersize=2, mfc='black', mec='black')
 #ax.coastlines(resolution='110m', color='grey', linestyle='-', alpha=1)
 plt.show()
 plt.close()
-
-

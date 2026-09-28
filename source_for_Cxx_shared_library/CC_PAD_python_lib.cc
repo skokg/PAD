@@ -1,82 +1,146 @@
-// Compile command for a linux system
-// g++ -fopenmp -O2 -Wall -Wno-unused-result -Wno-unknown-pragmas -shared -o PAD_Cxx_shared_library.so -fPIC CC_PAD_python_lib.cc
-
-
-#include <iostream>
-#include <fstream>
-#include <algorithm>
-#include <vector>
-#include <sstream>
-#include <sys/stat.h>
-#include <sys/resource.h>
-#include <string.h>
+// Linux build from this directory (planar ABI 2; old binaries must be rebuilt):
+// g++ -std=c++11 -O2 -Wall -Wextra -pthread -shared -fPIC -o ../PAD_Cxx_shared_library.so CC_PAD_python_lib.cc
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <limits>
+#include <memory>
+#include <mutex>
 #include <random>
-#include <chrono>
-#include <cstring>
+#include <stdexcept>
+#include <vector>
 
-using namespace std;
+// Only the utilities needed by PAD; failures throw rather than exiting Python.
+namespace {
+std::mt19937 rng_state_global;
 
-#define BAD_DATA_FLOAT -9999
+double ran2(long *seed)
+{
+    if (*seed < 0)
+    {
+        if (*seed == std::numeric_limits<long>::min())
+            throw std::invalid_argument("Random seed cannot be LONG_MIN.");
+        rng_state_global.seed(-*seed);
+        *seed = -*seed;
+    }
+    return std::uniform_real_distribution<double>(0.0, 1.0)(rng_state_global);
+}
+}
 
-// da prav dela error(..) - da prav displaya line number
-#define STRINGIFY(x) #x
-#define TOSTRING(x) STRINGIFY(x)
-#define AT __FILE__ ":" TOSTRING(__LINE__)
-#define FU __PRETTY_FUNCTION__
-#define TT "\t"
-#define tabt "\t"
-#define ERRORIF(x) if (x) error(AT,FU, #x)
-
-const rlim_t kStackSize = 1000 * 1024 * 1024;   // min stack size = 16 MB
-
-long random_number_seed=-1;
-
-//#include "CU_utils.cc"
-#include "CU_utils_subset.cc"
 #include "CU_PAD_code.cc"
 
-vector <vector <double> > X_Y_val_arrays_to_XY_points(const double * const x, const double * const y, const double * const values, const size_t size)
-	{
-	vector <vector <double> > points;
-	for (size_t il = 0; il < size; il++)
-		{
-		points.push_back({x[il],y[il],values[il]});
-		}
-	return(points);
-	}
+namespace {
+thread_local char last_error[1024] = {};
+// ctypes releases the GIL, so protect PAD's shared random generator.
+std::mutex calculation_mutex;
 
-extern "C" void free_mem_double_array(double* a)
-	{
-	delete[] a;
-	}
+void save_error(const char *message) noexcept
+{
+    std::snprintf(last_error, sizeof(last_error), "%s", message ? message : "Unknown PAD error");
+}
 
-extern "C"  double * calculate_PAD_results_assume_different_grid_ctypes(const double * const x1, const double * const y1, const double * const values1, const size_t size1, const double * const x2, const double * const y2, const double * const values2, const size_t size2, size_t * const number_of_attributions)
-	{
-    vector <vector <double> > points1 =  X_Y_val_arrays_to_XY_points(x1,y1,values1, size1);
-    vector <vector <double> > points2 =  X_Y_val_arrays_to_XY_points(x2,y2,values2, size2);
+PADPoints make_points(const double *x, const double *y, const double *values, std::size_t size)
+{
+    if (!x || !y || !values || size == 0)
+        throw std::invalid_argument("PAD requires nonempty, non-null input buffers.");
+    if (size > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) ||
+        size - 1 > std::numeric_limits<kdtree::IndexType>::max())
+        throw std::length_error("Too many PAD grid points.");
+    PADPoints points;
+    points.reserve(size);
+    for (std::size_t i = 0; i < size; ++i)
+        points.push_back({x[i], y[i], values[i]});
+    // The core validates all rows, including zero-valued points, before building.
+    return points;
+}
 
-	vector <double> non_attributed_values1;
-	vector <double> non_attributed_values2;
+double *pack_results(const PADResults &results, const std::vector<double> &remaining1,
+                     const std::vector<double> &remaining2)
+{
+    const std::size_t limit = std::numeric_limits<std::size_t>::max() / sizeof(double);
+    if (remaining1.size() > limit || remaining2.size() > limit - remaining1.size())
+        throw std::length_error("PAD output is too large.");
+    const std::size_t tail = remaining1.size() + remaining2.size();
+    if (results.size() > (limit - tail) / 4)
+        throw std::length_error("PAD output is too large.");
+    std::unique_ptr<double[]> buffer(new double[results.size() * 4 + tail]);
+    std::size_t position = 0;
+    for (const PADResult &row : results)
+    {
+        buffer[position++] = row.distance;
+        buffer[position++] = row.attributed_amount;
+        buffer[position++] = static_cast<double>(row.index1);
+        buffer[position++] = static_cast<double>(row.index2);
+    }
+    for (double value : remaining1) buffer[position++] = value;
+    for (double value : remaining2) buffer[position++] = value;
+    return buffer.release();
+}
 
-	vector <vector <double>> results = calculate_PAD_results_assume_different_grid(points1, points2, non_attributed_values1, non_attributed_values2);
+// The caller supplies accessible buffers of the stated lengths. No exception
+// crosses the C boundary; nullptr indicates an error, NOT an empty result.
+double *calculate(const double *x1, const double *y1, const double *values1, std::size_t size1,
+                  const double *x2, const double *y2, const double *values2, std::size_t size2,
+                  std::size_t *count, double euclidian_cutoff, std::int64_t random_seed,
+                  bool same_grid) noexcept
+{
+    last_error[0] = '\0';
+    if (count) *count = 0;
+    try
+    {
+        if (!count) throw std::invalid_argument("Missing attribution-count output pointer.");
+        std::lock_guard<std::mutex> lock(calculation_mutex);
+        validate_PAD_cutoff(euclidian_cutoff);
+        validate_PAD_random_seed(random_seed);
+        auto points1 = make_points(x1, y1, values1, size1);
+        PADPoints points2;
+        if (same_grid)
+        {
+            if (!values2 || size2 != size1)
+                throw std::invalid_argument("Same-grid fields require matching non-null input buffers.");
+            points2.reserve(size2);
+            for (std::size_t i = 0; i < size2; ++i)
+                points2.push_back({points1[i][0], points1[i][1], values2[i]});
+        }
+        else points2 = make_points(x2, y2, values2, size2);
+        std::vector<double> remaining1, remaining2;
+        PADResults results = same_grid
+            ? calculate_PAD_results_assume_same_grid_and_remove_overlap(
+                points1, points2, euclidian_cutoff, remaining1, remaining2, random_seed)
+            : calculate_PAD_results_assume_different_grid(
+                points1, points2, euclidian_cutoff, remaining1, remaining2, random_seed);
+        double *buffer = pack_results(results, remaining1, remaining2);
+        *count = results.size();
+        return buffer;
+    }
+    catch (const std::exception &error) { save_error(error.what()); }
+    catch (...) { save_error("Unknown C++ exception during planar PAD calculation."); }
+    return nullptr;
+}
+}
 
-	// SERIALIZE the output into a double vector
-	vector <double> out;
-	for (unsigned long il=0; il < results.size(); il++)
-		{
-		out.push_back(results[il][0]);
-		out.push_back(results[il][1]);
-		out.push_back(results[il][2]);
-		out.push_back(results[il][3]);
-		}
-	out.insert(out.end(), non_attributed_values1.begin(), non_attributed_values1.end());
-	out.insert(out.end(), non_attributed_values2.begin(), non_attributed_values2.end());
+// Use a planar-specific ABI symbol so a spherical or legacy .so is rejected.
+extern "C" int PAD_planar_wrapper_abi_version() noexcept { return 2; }
+extern "C" const char *PAD_last_error() noexcept { return last_error; }
+extern "C" void free_mem_double_array(double *buffer) noexcept { delete[] buffer; }
 
-	double* out_arr = new double[out.size()];
-	std::copy(out.begin(), out.end(), out_arr);
+// ABI 2: four doubles per result, followed by size1 and size2 residual amounts.
+// Cutoff is Euclidean in coordinate units; DBL_MAX is unrestricted. Seed -1
+// chooses a random seed. Amounts are NOT normalized at this C/C++ layer.
+extern "C" double *calculate_PAD_results_assume_same_grid_ctypes(
+    const double *x, const double *y, const double *values1, const double *values2,
+    std::size_t size, std::size_t *count, double euclidian_cutoff, std::int64_t random_seed) noexcept
+{
+    return calculate(x, y, values1, size, x, y, values2, size,
+                     count, euclidian_cutoff, random_seed, true);
+}
 
-	*number_of_attributions = results.size();
-
-	return(out_arr);
-	}
-
+extern "C" double *calculate_PAD_results_assume_different_grid_ctypes(
+    const double *x1, const double *y1, const double *values1, std::size_t size1,
+    const double *x2, const double *y2, const double *values2, std::size_t size2,
+    std::size_t *count, double euclidian_cutoff, std::int64_t random_seed) noexcept
+{
+    return calculate(x1, y1, values1, size1, x2, y2, values2, size2,
+                     count, euclidian_cutoff, random_seed, false);
+}
