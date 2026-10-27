@@ -1,9 +1,0 @@
-
-Run from this source_for_Cxx_shared_library directory on Linux:
-
-g++ -std=c++11 -O2 -Wall -Wextra -pthread -shared -fPIC -o ../PAD_Cxx_shared_library.so CC_PAD_python_lib.cc
-
-This writes the rebuilt library beside PY_PAD_library.py, where Python loads it.
-No binary was built during this update. An old .so, if used, is incompatible with
-the updated wrapper and MUST be rebuilt.
-
