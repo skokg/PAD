@@ -1,5 +1,3 @@
-// Linux build from this directory (planar ABI 2; old binaries must be rebuilt):
-// g++ -std=c++11 -O2 -Wall -Wextra -pthread -shared -fPIC -o ../PAD_Cxx_shared_library.so CC_PAD_python_lib.cc
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
