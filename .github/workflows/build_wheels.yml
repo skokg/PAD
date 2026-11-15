@@ -57,6 +57,36 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Select Visual C++ runtime DLLs
+        if: matrix.target == 'windows-x86_64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) {
+            throw 'Cannot locate Visual Studio C++ tools.'
+          }
+          $toolsVersion = [version](Get-Content (Join-Path $vs 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt') -Raw).Trim()
+          $redistRoot = Join-Path $vs 'VC\Redist\MSVC'
+          $redist = Get-ChildItem $redistRoot -Directory |
+            Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } |
+            Sort-Object { [version]$_.Name } -Descending |
+            Select-Object -First 1
+          if (-not $redist) {
+            throw 'Cannot locate the Visual C++ redistributable.'
+          }
+          $redistVersion = [version]$redist.Name
+          if ([version]::new($redistVersion.Major, $redistVersion.Minor) -lt [version]::new($toolsVersion.Major, $toolsVersion.Minor)) {
+            throw 'The Visual C++ redistributable is older than the compiler toolset.'
+          }
+          $crt = Join-Path $redist.FullName 'x64\Microsoft.VC143.CRT'
+          foreach ($dll in @('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll')) {
+            $file = Get-Item (Join-Path $crt $dll)
+            Write-Host "$($file.FullName): $($file.VersionInfo.FileVersion)"
+          }
+          "PAD_WINDOWS_CRT_PATH=$crt" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Build wheel and run core tests
         uses: pypa/cibuildwheel@v4.3.5
         with:
@@ -67,8 +97,9 @@ jobs:
           CIBW_ARCHS: ${{ fromJSON('{"linux-x86_64":"x86_64","windows-x86_64":"AMD64","macos-intel":"x86_64","macos-apple-silicon":"arm64"}')[matrix.target] }}
           CIBW_BUILD_VERBOSITY: '1'
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          # Prefer the compiler redistributable over unrelated DLLs on PATH.
           # The ctypes DLL is not a .pyd: scan and bundle its runtime dependencies.
-          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: 'delvewheel repair --analyze-existing --custom-patch -w {dest_dir} -v {wheel}'
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: 'delvewheel repair --add-path "${{ env.PAD_WINDOWS_CRT_PATH }}" --analyze-existing --custom-patch -w {dest_dir} -v {wheel}'
           CIBW_TEST_COMMAND: 'python "{project}/tests/test_pad_python.py" && python "{project}/tests/test_packaging.py"'
           PYTHONUNBUFFERED: '1'
 
