@@ -704,70 +704,41 @@ namespace kdtree
 			validate_point_coordinates(point);
 			if(root == nullptr) return nullptr;
 			const Node * nearestNode = root;
-			float minDist_sqr = calDist_sqr(point, nearestNode->val);
+			double minDist_sqr = nearest_distance_sqr(point, nearestNode->val);
 			findNearestNodeHelper<0>(root, point, minDist_sqr, nearestNode);
 			return nearestNode;
 			}
 
-		// Preserve findNearestNode's float-distance ordering/ties, then apply an
-		// inclusive radius check using double accumulation of coordinate products.
-		// Thus this is nearest-then-filter, not a different tie-breaking policy.
+		// Rank candidates, prune bounds and apply the inclusive cutoff using the
+		// same double accumulation of PointType products used by PAD's distances.
 		const Node * findNearestNode_in_radius(const Point &point, const double squared_euclidian_radius) const
 			{
 			validate_point_coordinates(point);
 			KDTREE_ERRORIF(isnan(squared_euclidian_radius) || squared_euclidian_radius < 0);
 			if (root == nullptr) return nullptr;
 
-			// Inflate the initial bound conservatively for float accumulation and
-			// strict '<' pruning, including zero/subnormal radii. The factor covers
-			// rounding across Dimensions terms; double accumulation is more precise.
-			const double rounding_budget = 2.0 * Dimensions * numeric_limits<float>::epsilon();
-			const Node * nearestNode;
-			if (!isfinite(squared_euclidian_radius) || rounding_budget >= 0.5 ||
-				numeric_limits<PointType>::digits != numeric_limits<float>::digits)
-				nearestNode = findNearestNode(point);
-			else
-				{
-				const double expanded_radius =
-					(squared_euclidian_radius + 2.0 * Dimensions * numeric_limits<float>::denorm_min()) /
-					(1.0 - rounding_budget);
-				if (expanded_radius >= numeric_limits<float>::max())
-					nearestNode = findNearestNode(point);
-				else
-					{
-					float minDist_sqr = nextafter(static_cast<float>(expanded_radius), numeric_limits<float>::infinity());
-					const float root_distance = calDist_sqr(point, root->val);
-					nearestNode = nullptr;
-					// Keep the original root preference when it can affect the answer.
-					if (root_distance < minDist_sqr)
-						{
-						nearestNode = root;
-						minDist_sqr = root_distance;
-						}
-					findNearestNodeHelper<0>(root, point, minDist_sqr, nearestNode);
-					}
-				}
+			// Search uses strict '<' for ties. One representable step above the
+			// cutoff admits points exactly on its boundary, including radius zero.
+			double minDist_sqr = std::nextafter(squared_euclidian_radius,
+				numeric_limits<double>::infinity());
+			const Node * nearestNode = nullptr;
+			findNearestNodeHelper<0>(root, point, minDist_sqr, nearestNode);
 
 			if (nearestNode == nullptr) return nullptr;
-			// Match PAD's arithmetic: do not replace these products with double
-			// coordinate arithmetic or the tree's float-accumulated distance.
-			double distance_sqr = 0;
-			for (size_t axis = 0; axis < Dimensions; ++axis)
-				distance_sqr += (point.coords[axis] - nearestNode->val.coords[axis]) *
-					(point.coords[axis] - nearestNode->val.coords[axis]);
-			return distance_sqr <= squared_euclidian_radius ? nearestNode : nullptr;
+			return nearest_distance_sqr(point, nearestNode->val) <= squared_euclidian_radius
+				? nearestNode : nullptr;
 			}
 
 		private:
 		template<size_t Axis>
-		void findNearestNodeHelper(const Node * const node, const Point& point, float& minDist_sqr, const Node * &nearestNode) const
+		void findNearestNodeHelper(const Node * const node, const Point& point, double& minDist_sqr, const Node * &nearestNode) const
 			{
 			static_assert(Axis < Dimensions, "The split axis must be within the tree dimensions.");
 			// Cycle through compile-time axes without storing an axis in each node.
 			constexpr size_t nextAxis = (Axis + 1) % Dimensions;
 			if(node == nullptr) return;
 			//float dist = calDist(point, node->val);
-			float dist_sqr = calDist_sqr(point, node->val);
+			const double dist_sqr = nearest_distance_sqr(point, node->val);
 			if(dist_sqr < minDist_sqr)
 				{
 				nearestNode = node;
@@ -779,8 +750,8 @@ namespace kdtree
 			const bool left_first = point.coords[Axis] < node->val.coords[Axis];
 			const Node *first = left_first ? node->leftNode : node->rightNode;
 			const Node *second = left_first ? node->rightNode : node->leftNode;
-			float first_bound = first ? distance_to_node_bounds_sqr(point, first) : numeric_limits<float>::infinity();
-			float second_bound = second ? distance_to_node_bounds_sqr(point, second) : numeric_limits<float>::infinity();
+			double first_bound = first ? distance_to_node_bounds_sqr(point, first) : numeric_limits<double>::infinity();
+			double second_bound = second ? distance_to_node_bounds_sqr(point, second) : numeric_limits<double>::infinity();
 			if (second_bound < first_bound)
 				{
 				std::swap(first, second);
@@ -794,15 +765,25 @@ namespace kdtree
 
 			}
 
-		float distance_to_node_bounds_sqr(const Point &point, const Node *node) const
+		double distance_to_node_bounds_sqr(const Point &point, const Node *node) const
 			{
-			float sum = 0;
+			double sum = 0;
 			for (size_t axis = 0; axis < Dimensions; ++axis)
 				{
-				const float delta = point.coords[axis] - clip_value_to_min_max(
+				const PointType delta = point.coords[axis] - clip_value_to_min_max(
 					point.coords[axis], node->coords_min[axis], node->coords_max[axis]);
 				sum += delta * delta;
 				}
+			return sum;
+			}
+
+		double nearest_distance_sqr(const Point &a, const Point &b) const
+			{
+			// Keep coordinate products in PointType to match PAD's reported
+			// distances, but never round the running sum back to float.
+			double sum = 0;
+			for (size_t axis = 0; axis < Dimensions; ++axis)
+				sum += (a.coords[axis] - b.coords[axis]) * (a.coords[axis] - b.coords[axis]);
 			return sum;
 			}
 

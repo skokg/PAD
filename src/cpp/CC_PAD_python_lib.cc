@@ -9,6 +9,12 @@
 #include <stdexcept>
 #include <vector>
 
+#ifdef _WIN32
+#define PAD_API extern "C" __declspec(dllexport)
+#else
+#define PAD_API extern "C" __attribute__((visibility("default")))
+#endif
+
 // Only the utilities needed by PAD; failures throw rather than exiting Python.
 namespace {
 std::mt19937 rng_state_global;
@@ -119,14 +125,14 @@ double *calculate(const double *x1, const double *y1, const double *values1, std
 }
 
 // Use a planar-specific ABI symbol so a spherical or legacy .so is rejected.
-extern "C" int PAD_planar_wrapper_abi_version() noexcept { return 2; }
-extern "C" const char *PAD_last_error() noexcept { return last_error; }
-extern "C" void free_mem_double_array(double *buffer) noexcept { delete[] buffer; }
+PAD_API int PAD_planar_wrapper_abi_version() noexcept { return 2; }
+PAD_API const char *PAD_last_error() noexcept { return last_error; }
+PAD_API void free_mem_double_array(double *buffer) noexcept { delete[] buffer; }
 
 // ABI 2: four doubles per result, followed by size1 and size2 residual amounts.
 // Cutoff is Euclidean in coordinate units; DBL_MAX is unrestricted. Seed -1
 // chooses a random seed. Amounts are NOT normalized at this C/C++ layer.
-extern "C" double *calculate_PAD_results_assume_same_grid_ctypes(
+PAD_API double *calculate_PAD_results_assume_same_grid_ctypes(
     const double *x, const double *y, const double *values1, const double *values2,
     std::size_t size, std::size_t *count, double euclidian_cutoff, std::int64_t random_seed) noexcept
 {
@@ -134,7 +140,7 @@ extern "C" double *calculate_PAD_results_assume_same_grid_ctypes(
                      count, euclidian_cutoff, random_seed, true);
 }
 
-extern "C" double *calculate_PAD_results_assume_different_grid_ctypes(
+PAD_API double *calculate_PAD_results_assume_different_grid_ctypes(
     const double *x1, const double *y1, const double *values1, std::size_t size1,
     const double *x2, const double *y2, const double *values2, std::size_t size2,
     std::size_t *count, double euclidian_cutoff, std::int64_t random_seed) noexcept

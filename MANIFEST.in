@@ -1,0 +1,10 @@
+# Explicit source archive contents; compiled libraries are built from source.
+global-exclude *
+include pyproject.toml setup.py MANIFEST.in Makefile README.md LICENSE
+include src/pad_python.py
+include src/cpp/CC_PAD_python_lib.cc
+include src/cpp/CU_PAD_code.cc src/cpp/CU_kdtree_with_index.cc
+include tests/test_pad_python.py tests/test_examples.py
+include tests/test_packaging.py
+include examples/example_PAD_01.py examples/example_PAD_02.py
+include examples/sample_data/*.nc

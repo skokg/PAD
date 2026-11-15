@@ -1,0 +1,349 @@
+# Run manually from the Actions tab of the packaging repository.
+# Select all combinations or a single system/Python version; never publishes.
+# The final job saves one ZIP with wheels, a tested source archive and build logs.
+name: Build wheels
+run-name: Wheels / ${{ inputs.target }} / Python ${{ inputs.python_version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: System and processor
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - linux-x86_64
+          - windows-x86_64
+          - macos-intel
+          - macos-apple-silicon
+      python_version:
+        description: Python version
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - '3.10'
+          - '3.11'
+          - '3.12'
+          - '3.13'
+          - '3.14'
+          - '3.15'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Python ${{ matrix.python_version }} / ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        target: ${{ fromJSON(inputs.target == 'all' && '["linux-x86_64","windows-x86_64","macos-intel","macos-apple-silicon"]' || format('["{0}"]', inputs.target)) }}
+        python_version: ${{ fromJSON(inputs.python_version == 'all' && '["3.10","3.11","3.12","3.13","3.14","3.15"]' || format('["{0}"]', inputs.python_version)) }}
+    runs-on: ${{ fromJSON('{"linux-x86_64":"ubuntu-24.04","windows-x86_64":"windows-2022","macos-intel":"macos-15-intel","macos-apple-silicon":"macos-15"}')[matrix.target] }}
+    timeout-minutes: 30
+    # Serialize matching combinations across individual and full-matrix runs.
+    concurrency:
+      group: pad-wheels-${{ github.ref }}-${{ matrix.target }}-${{ matrix.python_version }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Check out package source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Build wheel and run core tests
+        uses: pypa/cibuildwheel@v4.3.5
+        with:
+          package-dir: .
+          output-dir: wheelhouse
+        env:
+          CIBW_BUILD: ${{ format('{0}-{1}', fromJSON('{"3.10":"cp310","3.11":"cp311","3.12":"cp312","3.13":"cp313","3.14":"cp314","3.15":"cp315"}')[matrix.python_version], fromJSON('{"linux-x86_64":"manylinux_x86_64","windows-x86_64":"win_amd64","macos-intel":"macosx_x86_64","macos-apple-silicon":"macosx_arm64"}')[matrix.target]) }}
+          CIBW_ARCHS: ${{ fromJSON('{"linux-x86_64":"x86_64","windows-x86_64":"AMD64","macos-intel":"x86_64","macos-apple-silicon":"arm64"}')[matrix.target] }}
+          CIBW_BUILD_VERBOSITY: '1'
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          # The ctypes DLL is not a .pyd: scan and bundle its runtime dependencies.
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: 'delvewheel repair --analyze-existing --custom-patch -w {dest_dir} -v {wheel}'
+          CIBW_TEST_COMMAND: 'python "{project}/tests/test_pad_python.py" && python "{project}/tests/test_packaging.py"'
+          PYTHONUNBUFFERED: '1'
+
+      # This step runs only if compilation, wheel repair, and testing succeed.
+      - name: Save tested wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: pad-python-py${{ matrix.python_version }}-${{ matrix.target }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          overwrite: true
+
+  source:
+    name: Build and test source archive
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out package source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Build and validate source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p logs
+          log="$PWD/logs/source.log"
+          python -m pip install build twine 2>&1 | tee "$log"
+          python -m build --sdist --outdir dist . 2>&1 | tee -a "$log"
+          python -m twine check dist/*.tar.gz 2>&1 | tee -a "$log"
+      - name: Install source archive in a clean environment and run core tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$PWD/logs/source.log"
+          shopt -s nullglob
+          archives=(dist/*.tar.gz)
+          test "${#archives[@]}" -eq 1
+          python -m venv "$RUNNER_TEMP/pad-source-install" 2>&1 | tee -a "$log"
+          "$RUNNER_TEMP/pad-source-install/bin/python" -m pip install --verbose --no-cache-dir "${archives[0]}" 2>&1 | tee -a "$log"
+          mkdir -p "$RUNNER_TEMP/pad-source-tests"
+          tar -xzf "${archives[0]}" -C "$RUNNER_TEMP/pad-source-tests" 2>&1 | tee -a "$log"
+          tests=("$RUNNER_TEMP"/pad-source-tests/*/tests/test_pad_python.py)
+          test "${#tests[@]}" -eq 1
+          "$RUNNER_TEMP/pad-source-install/bin/python" "${tests[0]}" 2>&1 | tee -a "$log"
+          PAD_SDIST_PATH="$PWD/${archives[0]}" "$RUNNER_TEMP/pad-source-install/bin/python" "${tests[0]%test_pad_python.py}test_packaging.py" 2>&1 | tee -a "$log"
+      - name: Save tested source archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: pad-python-source
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          overwrite: true
+
+      - name: Save source log even on failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pad-python-log-source
+          path: logs/*.log
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: true
+
+  minimum-dependencies:
+    name: Minimum Python and NumPy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out package source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set up minimum Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+      - name: Install with minimum NumPy and run installed-package tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/pad-minimum"
+          "$RUNNER_TEMP/pad-minimum/bin/python" -m pip install "numpy==1.23.0" .
+          "$RUNNER_TEMP/pad-minimum/bin/python" -m pip check
+          "$RUNNER_TEMP/pad-minimum/bin/python" tests/test_pad_python.py
+          "$RUNNER_TEMP/pad-minimum/bin/python" tests/test_packaging.py
+
+  collect:
+    name: Collect distributions and logs
+    needs: [build, source, minimum-dependencies]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Download the tested wheels
+        uses: actions/download-artifact@v8
+        with:
+          pattern: pad-python-py*-*
+          path: release-bundle
+          merge-multiple: true
+
+      - name: Download the tested source archive if available
+        if: ${{ !cancelled() }}
+        uses: actions/download-artifact@v8
+        with:
+          pattern: pad-python-source
+          path: release-bundle
+          merge-multiple: true
+
+      # Read completed job logs through GitHub's API, including setup,
+      # compilation, repair, tests and artifact upload. No package code runs here.
+      - name: Combine wheel and source job logs and check the bundle
+        if: ${{ !cancelled() }}
+        uses: actions/github-script@v8
+        env:
+          SELECTED_TARGET: ${{ inputs.target }}
+          SELECTED_PYTHON: ${{ inputs.python_version }}
+        with:
+          # A completed job's log can take a moment to become available.
+          retries: 4
+          retry-exempt-status-codes: 400,401,403,422
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const crypto = require('node:crypto');
+            const directory = 'release-bundle';
+            fs.mkdirSync(directory, { recursive: true });
+            const logPath = path.join(directory, 'wheel-builds.log');
+            const runUrl = context.serverUrl + '/' + context.repo.owner + '/' +
+              context.repo.repo + '/actions/runs/' + context.runId;
+            fs.writeFileSync(logPath,
+              'Planar PAD wheel and source build logs\nRun: ' + runUrl +
+              '\nCommit: ' + context.sha +
+              '\nCollection attempt: ' + process.env.GITHUB_RUN_ATTEMPT +
+              '\nIncludes wheel and source jobs from all available attempts of this run.\n',
+              'utf8');
+
+            const targets = process.env.SELECTED_TARGET === 'all'
+              ? ['linux-x86_64', 'windows-x86_64', 'macos-intel', 'macos-apple-silicon']
+              : [process.env.SELECTED_TARGET];
+            const versions = process.env.SELECTED_PYTHON === 'all'
+              ? ['3.10', '3.11', '3.12', '3.13', '3.14', '3.15']
+              : [process.env.SELECTED_PYTHON];
+            const expectedJobs = new Set(targets.flatMap(target =>
+              versions.map(version => 'Python ' + version + ' / ' + target)));
+            const expectedWheelCount = expectedJobs.size;
+            expectedJobs.add('Build and test source archive');
+            expectedJobs.add('Minimum Python and NumPy');
+            const problems = [];
+            let jobs = [];
+            try {
+              jobs = await github.paginate(
+                'GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs',
+                { ...context.repo, run_id: context.runId, filter: 'all', per_page: 100 }
+              );
+              jobs = jobs.filter(job => expectedJobs.has(job.name));
+              jobs.sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
+            } catch (error) {
+              problems.push('Could not list build jobs: ' + error.message);
+            }
+
+            const latestJobs = new Map();
+            for (const job of jobs) {
+              const previous = latestJobs.get(job.name);
+              if (!previous || job.id > previous.id) latestJobs.set(job.name, job);
+              fs.appendFileSync(logPath,
+                '\n' + '='.repeat(80) + '\n' + job.name +
+                '\nJob ID: ' + job.id + '\nStarted: ' + job.started_at +
+                '\nResult: ' + job.status + ' / ' + job.conclusion +
+                '\nURL: ' + job.html_url + '\n' + '='.repeat(80) + '\n');
+              try {
+                const response = await github.request(
+                  'GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs',
+                  { ...context.repo, job_id: job.id }
+                );
+                const text = typeof response.data === 'string'
+                  ? response.data : Buffer.from(response.data).toString('utf8');
+                fs.appendFileSync(logPath, text + '\n');
+              } catch (error) {
+                const message = 'Could not download logs for ' + job.name +
+                  ' (job ' + job.id + '): ' + error.message;
+                problems.push(message);
+                fs.appendFileSync(logPath, 'LOG DOWNLOAD FAILED: ' + message + '\n');
+              }
+            }
+
+            for (const name of expectedJobs) {
+              const job = latestJobs.get(name);
+              if (!job || job.status !== 'completed' || job.conclusion !== 'success') {
+                problems.push('No successful completed build for ' + name);
+              }
+            }
+            const wheels = fs.readdirSync(directory)
+              .filter(name => name.endsWith('.whl')).sort();
+            if (wheels.length !== expectedWheelCount) {
+              problems.push('Expected ' + expectedWheelCount +
+                ' wheels; collected ' + wheels.length);
+            }
+            const sources = fs.readdirSync(directory)
+              .filter(name => name.endsWith('.tar.gz')).sort();
+            if (sources.length !== 1) {
+              problems.push('Expected one source archive; collected ' + sources.length);
+            }
+
+            const status = problems.length === 0 ? 'COMPLETE' : 'INCOMPLETE';
+            const report = 'Bundle status: ' + status +
+              '\nWheels: ' + wheels.length + ' / ' + expectedWheelCount +
+              '\nSource archives: ' + sources.length + ' / 1' +
+              '\nBuild logs collected from ' + jobs.length + ' job attempts.\n' +
+              (problems.length ? problems.join('\n') + '\n' : '');
+            fs.writeFileSync(path.join(directory, 'BUILD_STATUS.txt'), report, 'utf8');
+            fs.appendFileSync(logPath, '\n' + report);
+
+            const files = [...wheels, ...sources, 'wheel-builds.log', 'BUILD_STATUS.txt'];
+            const checksums = files.map(name => {
+              const hash = crypto.createHash('sha256')
+                .update(fs.readFileSync(path.join(directory, name))).digest('hex');
+              return hash + '  ' + name;
+            });
+            fs.writeFileSync(path.join(directory, 'SHA256SUMS.txt'),
+              checksums.join('\n') + '\n', 'utf8');
+
+            await core.summary
+              .addHeading('Combined distribution download')
+              .addRaw('Download the **pad-python-all-wheels** artifact below. ' +
+                'Its ZIP contains the selected wheels, a tested source archive, **wheel-builds.log**, ' +
+                '**BUILD_STATUS.txt** and **SHA256SUMS.txt**.\n\n')
+              .addCodeBlock(report, 'text')
+              .write();
+            if (problems.length) core.setFailed('Incomplete bundle; see BUILD_STATUS.txt.');
+
+      - name: Save PyPI upload files as one ZIP
+        if: ${{ success() && needs.build.result == 'success' && needs.source.result == 'success' && needs['minimum-dependencies'].result == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: pad-python-pypi
+          path: |
+            release-bundle/*.whl
+            release-bundle/*.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          overwrite: true
+
+      - name: Save single combined log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: release-bundle/wheel-builds.log
+          archive: false
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+      # Preserve available wheels and diagnostics even if a build/log failed.
+      - name: Save one ZIP containing wheels, source and the combined log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: pad-python-all-wheels
+          path: release-bundle/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          overwrite: true
+

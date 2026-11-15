@@ -7,16 +7,31 @@ return [attributions, remaining1, remaining2]. No cutoff is used by default.
 import ctypes as ct
 import operator
 from pathlib import Path
+import sys
 
 import numpy as np
 
-_library_path = Path(__file__).resolve().parent / "PAD_Cxx_shared_library.so"
+# Windows wheel repair inserts the bundled-DLL search path here.
+# delvewheel: patch
+
+__all__ = [
+    "check_input_fields",
+    "calculate_PAD_attributions",
+    "calculate_PAD_distance_from_attributions",
+]
+
+_native_library_names = {
+    "linux": "libpad_python.so",
+    "win32": "pad_python.dll",
+    "darwin": "libpad_python.dylib",
+}
+if sys.platform not in _native_library_names:
+    raise ImportError("pad_python supports Linux, Windows and macOS.")
+_library_path = Path(__file__).resolve().with_name(_native_library_names[sys.platform])
 _compile_advice = (
-    "To compile on Linux, install GNU Make and a C++11-compatible compiler "
-    "(g++ by default), then run `make` in the folder containing PAD_library.py "
-    f"and the Makefile: {_library_path.parent}. "
-    "This creates PAD_Cxx_shared_library.so in that folder. "
-    "To rebuild an existing library, run `make -B`."
+    "Reinstall pad_python using a compatible wheel, or build from source with "
+    "a C++ compiler. For manual Linux builds, run make in the repository root "
+    "to create src/libpad_python.so beside src/pad_python.py."
 )
 if not _library_path.is_file():
     raise ImportError(
@@ -34,7 +49,7 @@ try:
     libc.PAD_planar_wrapper_abi_version.restype = ct.c_int
 except AttributeError as exc:
     raise ImportError(
-        "Rebuild PAD_Cxx_shared_library.so: planar wrapper ABI 2 is required. "
+        "Rebuild pad_python's native library: planar wrapper ABI 2 is required. "
         + _compile_advice
     ) from exc
 if libc.PAD_planar_wrapper_abi_version() != 2:
@@ -217,6 +232,10 @@ def calculate_PAD_distance_from_attributions(PAD_attributions):
     if (not np.all(np.isfinite(distances)) or not np.all(np.isfinite(weights))
             or np.any(distances < 0) or np.any(weights < 0) or not np.any(weights > 0)):
         raise ValueError("PAD requires finite nonnegative distances and positive total weight.")
+    # Zero-weight rows contribute nothing and must not set the distance scale:
+    # an irrelevant huge distance could otherwise underflow all useful ratios.
+    positive = weights > 0
+    distances, weights = distances[positive], weights[positive]
     weights = weights / weights.max()
     scale = distances.max()
     if scale == 0:
